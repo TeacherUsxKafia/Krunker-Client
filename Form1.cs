@@ -20,6 +20,7 @@ public sealed class Form1 : Form
     // Priority changes are limited to WebView2 child processes.
     // The application and Desktop Window Manager are not reprioritized.
     private const bool EnableWebViewProcessPriority = true;
+
     private const ProcessPriorityClass WebViewProcessPriority =
         ProcessPriorityClass.High;
 
@@ -61,7 +62,9 @@ public sealed class Form1 : Form
         Shown += Form1_Shown;
     }
 
-    private async void Form1_Shown(object? sender, EventArgs e)
+    private async void Form1_Shown(
+        object? sender,
+        EventArgs e)
     {
         if (browserInitializationStarted)
         {
@@ -72,7 +75,8 @@ public sealed class Form1 : Form
 
         try
         {
-            await InitializeBrowserAsync(lifetimeCts.Token);
+            await InitializeBrowserAsync(
+                lifetimeCts.Token);
         }
         catch (OperationCanceledException)
             when (lifetimeCts.IsCancellationRequested)
@@ -114,11 +118,13 @@ public sealed class Form1 : Form
 
         cancellationToken.ThrowIfCancellationRequested();
 
-        await webView.EnsureCoreWebView2Async(environment);
+        await webView.EnsureCoreWebView2Async(
+            environment);
 
         cancellationToken.ThrowIfCancellationRequested();
 
-        CoreWebView2 coreWebView = webView.CoreWebView2;
+        CoreWebView2 coreWebView =
+            webView.CoreWebView2;
 
         coreWebView.Settings.IsZoomControlEnabled = false;
         coreWebView.Settings.AreDefaultContextMenusEnabled = false;
@@ -143,7 +149,8 @@ public sealed class Form1 : Form
                     lifetimeCts.Token);
         }
 
-        coreWebView.Navigate("https://krunker.io/");
+        coreWebView.Navigate(
+            "https://krunker.io/");
     }
 
     private static string BuildBrowserArguments()
@@ -165,7 +172,9 @@ public sealed class Form1 : Form
             "--enable-zero-copy"
         ];
 
-        return string.Join(' ', arguments);
+        return string.Join(
+            ' ',
+            arguments);
     }
 
     private void CoreWebView2_NewWindowRequested(
@@ -206,19 +215,29 @@ public sealed class Form1 : Form
             return;
         }
 
-        bool allowed =
-            destination.Scheme == Uri.UriSchemeHttp ||
-            destination.Scheme == Uri.UriSchemeHttps ||
-            destination.Scheme == Uri.UriSchemeAbout;
+        bool isHttp =
+            destination.Scheme == Uri.UriSchemeHttp;
 
-        e.Cancel = !allowed;
+        bool isHttps =
+            destination.Scheme == Uri.UriSchemeHttps;
+
+        // Uri.UriSchemeAbout does not exist in .NET, so compare the
+        // about scheme explicitly.
+        bool isAbout =
+            string.Equals(
+                destination.Scheme,
+                "about",
+                StringComparison.OrdinalIgnoreCase);
+
+        e.Cancel = !(isHttp || isHttps || isAbout);
     }
 
     private async Task MonitorWebViewProcessesAsync(
         CancellationToken cancellationToken)
     {
         using var timer =
-            new PeriodicTimer(TimeSpan.FromSeconds(3));
+            new PeriodicTimer(
+                TimeSpan.FromSeconds(3));
 
         try
         {
@@ -227,7 +246,8 @@ public sealed class Form1 : Form
                 ApplyWebViewProcessPriority();
             }
             while (await timer
-                .WaitForNextTickAsync(cancellationToken)
+                .WaitForNextTickAsync(
+                    cancellationToken)
                 .ConfigureAwait(false));
         }
         catch (OperationCanceledException)
@@ -240,7 +260,8 @@ public sealed class Form1 : Form
     private static void ApplyWebViewProcessPriority()
     {
         foreach (Process process in
-                 Process.GetProcessesByName("msedgewebview2"))
+                 Process.GetProcessesByName(
+                     "msedgewebview2"))
         {
             using (process)
             {
@@ -260,15 +281,18 @@ public sealed class Form1 : Form
                 }
                 catch (ArgumentException)
                 {
-                    // The process exited between enumeration and inspection.
+                    // The process exited between enumeration
+                    // and inspection.
                 }
                 catch (InvalidOperationException)
                 {
-                    // The process exited or no longer exposes metadata.
+                    // The process exited or no longer exposes
+                    // its metadata.
                 }
                 catch (Win32Exception)
                 {
-                    // Access may be denied for another security context.
+                    // Access may be denied for another security
+                    // context.
                 }
             }
         }
