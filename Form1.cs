@@ -18,7 +18,6 @@ public sealed class Form1 : Form
     private const bool EnableGlobalMouseHook = true;
 
     // Priority changes are limited to WebView2 child processes.
-    // The application and Desktop Window Manager are not reprioritized.
     private const bool EnableWebViewProcessPriority = true;
 
     private const ProcessPriorityClass WebViewProcessPriority =
@@ -126,6 +125,17 @@ public sealed class Form1 : Form
         CoreWebView2 coreWebView =
             webView.CoreWebView2;
 
+        CoreWebView2Controller? controller =
+            webView.CoreWebView2Controller;
+
+        if (controller is not null)
+        {
+            // AcceleratorKeyPressed belongs to CoreWebView2Controller.
+            // WebView2 sends this event when the embedded browser has focus.
+            controller.AcceleratorKeyPressed +=
+                CoreWebView2Controller_AcceleratorKeyPressed;
+        }
+
         coreWebView.Settings.IsZoomControlEnabled = false;
         coreWebView.Settings.AreDefaultContextMenusEnabled = false;
         coreWebView.Settings.AreDevToolsEnabled = false;
@@ -155,18 +165,18 @@ public sealed class Form1 : Form
 
     private static string BuildBrowserArguments()
     {
-        // These are conservative Chromium switches that reduce background
-        // throttling while preserving normal GPU scheduling and compositor
-        // behavior.
-        //
-        // Disabling vsync, IPC flood protection, or the GPU blocklist can
-        // cause tearing, hangs, or driver instability, so those switches are
-        // intentionally not used.
+        // These switches disable Chromium's GPU vsync and frame-rate limit.
+        // Actual FPS may still be limited by the game, display refresh rate,
+        // GPU driver behavior, or WebView2 implementation details.
         string[] arguments =
         [
             "--disable-background-timer-throttling",
             "--disable-renderer-backgrounding",
             "--disable-backgrounding-occluded-windows",
+
+            "--disable-gpu-vsync",
+            "--disable-frame-rate-limit",
+
             "--enable-gpu-rasterization",
             "--enable-oop-rasterization",
             "--enable-zero-copy"
@@ -175,6 +185,40 @@ public sealed class Form1 : Form
         return string.Join(
             ' ',
             arguments);
+    }
+
+    private void CoreWebView2Controller_AcceleratorKeyPressed(
+        object? sender,
+        CoreWebView2AcceleratorKeyPressedEventArgs e)
+    {
+        bool isF11 =
+            e.VirtualKey == (uint)Keys.F11;
+
+        bool isKeyDown =
+            e.KeyKind == CoreWebView2KeyEventKind.KeyDown;
+
+        if (!isF11 || !isKeyDown)
+        {
+            return;
+        }
+
+        // Prevent WebView2 from handling F11 itself.
+        e.Handled = true;
+
+        if (IsDisposed || !IsHandleCreated)
+        {
+            return;
+        }
+
+        if (InvokeRequired)
+        {
+            BeginInvoke(
+                new Action(ToggleFullscreen));
+
+            return;
+        }
+
+        ToggleFullscreen();
     }
 
     private void CoreWebView2_NewWindowRequested(
@@ -205,7 +249,7 @@ public sealed class Form1 : Form
         CoreWebView2NavigationStartingEventArgs e)
     {
         // Prevent web content from launching arbitrary local applications,
-        // file URLs, or other unsupported schemes.
+        // file URLs, or unsupported schemes.
         if (!Uri.TryCreate(
                 e.Uri,
                 UriKind.Absolute,
@@ -221,8 +265,6 @@ public sealed class Form1 : Form
         bool isHttps =
             destination.Scheme == Uri.UriSchemeHttps;
 
-        // Uri.UriSchemeAbout does not exist in .NET, so compare the
-        // about scheme explicitly.
         bool isAbout =
             string.Equals(
                 destination.Scheme,
@@ -286,13 +328,11 @@ public sealed class Form1 : Form
                 }
                 catch (InvalidOperationException)
                 {
-                    // The process exited or no longer exposes
-                    // its metadata.
+                    // The process exited or metadata is unavailable.
                 }
                 catch (Win32Exception)
                 {
-                    // Access may be denied for another security
-                    // context.
+                    // Access may be denied for another security context.
                 }
             }
         }
@@ -353,8 +393,8 @@ public sealed class Form1 : Form
             }
         }
 
-        // Do not perform managed UI work, allocation, logging, sleeping,
-        // or input injection in this callback. Pass through immediately.
+        // Keep this callback fast: no UI calls, allocation, logging,
+        // sleeping, or mouse-event injection.
         return CallNextHookEx(
             IntPtr.Zero,
             code,
@@ -397,25 +437,34 @@ public sealed class Form1 : Form
         isFullscreen = true;
     }
 
-    protected override void OnFormClosing(
-        FormClosingEventArgs e)
+protected override void OnFormClosing(
+    FormClosingEventArgs e)
+{
+    lifetimeCts.Cancel();
+
+    UninstallMouseHook();
+
+    // AcceleratorKeyPressed belongs to CoreWebView2Controller.
+    CoreWebView2Controller? controller =
+        webView.CoreWebView2Controller;
+
+    if (controller is not null)
     {
-        lifetimeCts.Cancel();
-
-        UninstallMouseHook();
-
-        if (webView.CoreWebView2 is not null)
-        {
-            webView.CoreWebView2.NewWindowRequested -=
-                CoreWebView2_NewWindowRequested;
-
-            webView.CoreWebView2.NavigationStarting -=
-                CoreWebView2_NavigationStarting;
-        }
-
-        base.OnFormClosing(e);
+        controller.AcceleratorKeyPressed -=
+            CoreWebView2Controller_AcceleratorKeyPressed;
     }
 
+    if (webView.CoreWebView2 is not null)
+    {
+        webView.CoreWebView2.NewWindowRequested -=
+            CoreWebView2_NewWindowRequested;
+
+        webView.CoreWebView2.NavigationStarting -=
+            CoreWebView2_NavigationStarting;
+    }
+
+    base.OnFormClosing(e);
+}
     protected override void OnFormClosed(
         FormClosedEventArgs e)
     {
