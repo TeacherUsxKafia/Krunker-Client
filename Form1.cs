@@ -12,9 +12,12 @@ public sealed class Form1 : Form
     private const int WmLButtonDown = 0x0201;
     private const int WmLButtonUp = 0x0202;
 
+    private const int WmKeyDown = 0x0100;
+    private const int WmSysKeyDown = 0x0104;
+
     // The hook only observes button state. It deliberately does not reinject
-    // mouse_event calls because reinjection causes recursive hooks, duplicate
-    // clicks, and input-queue stalls under load.
+    // mouse_event calls because reinjection can cause recursive hooks,
+    // duplicate clicks, and input-queue stalls.
     private const bool EnableGlobalMouseHook = true;
 
     // Priority changes are limited to WebView2 child processes.
@@ -35,6 +38,7 @@ public sealed class Form1 : Form
     };
 
     private readonly CancellationTokenSource lifetimeCts = new();
+    private readonly F11MessageFilter f11MessageFilter;
 
     private IntPtr mouseHookId;
     private Task? processPriorityTask;
@@ -57,7 +61,12 @@ public sealed class Form1 : Form
 
         Controls.Add(webView);
 
-        KeyDown += Form1_KeyDown;
+        // WebView2 versions differ in which accelerator APIs they expose.
+        // The message filter works without depending on those APIs and can
+        // catch F11 while the embedded browser has focus.
+        f11MessageFilter = new F11MessageFilter(this);
+        Application.AddMessageFilter(f11MessageFilter);
+
         Shown += Form1_Shown;
     }
 
@@ -125,11 +134,6 @@ public sealed class Form1 : Form
         CoreWebView2 coreWebView =
             webView.CoreWebView2;
 
-        // AcceleratorKeyPressed is exposed directly by the WinForms WebView2
-        // control. It fires while the embedded browser has keyboard focus.
-        webView.AcceleratorKeyPressed +=
-            WebView_AcceleratorKeyPressed;
-
         coreWebView.Settings.IsZoomControlEnabled = false;
         coreWebView.Settings.AreDefaultContextMenusEnabled = false;
         coreWebView.Settings.AreDevToolsEnabled = false;
@@ -159,8 +163,8 @@ public sealed class Form1 : Form
 
     private static string BuildBrowserArguments()
     {
-        // These switches disable Chromium's GPU vsync and frame-rate limit.
-        // Actual FPS may still be limited by the game, display refresh rate,
+        // These switches disable Chromium GPU vsync and its frame-rate limit.
+        // Actual FPS can still be limited by the game, display refresh rate,
         // GPU driver behavior, or WebView2 implementation details.
         string[] arguments =
         [
@@ -179,41 +183,6 @@ public sealed class Form1 : Form
         return string.Join(
             ' ',
             arguments);
-    }
-
-    private void WebView_AcceleratorKeyPressed(
-        object? sender,
-        CoreWebView2AcceleratorKeyPressedEventArgs e)
-    {
-        bool isF11 =
-            e.VirtualKey == (uint)Keys.F11;
-
-        bool isKeyDown =
-            e.KeyEventKind ==
-            CoreWebView2KeyEventKind.KeyDown;
-
-        if (!isF11 || !isKeyDown)
-        {
-            return;
-        }
-
-        // Prevent WebView2 from handling F11 itself.
-        e.Handled = true;
-
-        if (IsDisposed || !IsHandleCreated)
-        {
-            return;
-        }
-
-        if (InvokeRequired)
-        {
-            BeginInvoke(
-                new Action(ToggleFullscreen));
-
-            return;
-        }
-
-        ToggleFullscreen();
     }
 
     private void CoreWebView2_NewWindowRequested(
@@ -388,8 +357,8 @@ public sealed class Form1 : Form
             }
         }
 
-        // Keep this callback fast: no UI calls, allocation, logging,
-        // sleeping, or mouse-event injection.
+        // Keep the low-level hook fast. Do not perform UI calls, allocation,
+        // logging, sleeping, or input injection here.
         return CallNextHookEx(
             IntPtr.Zero,
             code,
@@ -397,23 +366,13 @@ public sealed class Form1 : Form
             lParam);
     }
 
-    private void Form1_KeyDown(
-        object? sender,
-        KeyEventArgs e)
+    private void ToggleFullscreen()
     {
-        if (e.KeyCode != Keys.F11)
+        if (IsDisposed || !IsHandleCreated)
         {
             return;
         }
 
-        ToggleFullscreen();
-
-        e.Handled = true;
-        e.SuppressKeyPress = true;
-    }
-
-    private void ToggleFullscreen()
-    {
         if (isFullscreen)
         {
             FormBorderStyle = previousBorderStyle;
@@ -432,16 +391,33 @@ public sealed class Form1 : Form
         isFullscreen = true;
     }
 
+    protected override bool ProcessCmdKey(
+        ref Message msg,
+        Keys keyData)
+    {
+        Keys keyCode =
+            keyData & Keys.KeyCode;
+
+        if (keyCode == Keys.F11)
+        {
+            ToggleFullscreen();
+            return true;
+        }
+
+        return base.ProcessCmdKey(
+            ref msg,
+            keyData);
+    }
+
     protected override void OnFormClosing(
         FormClosingEventArgs e)
     {
         lifetimeCts.Cancel();
 
-        UninstallMouseHook();
+        Application.RemoveMessageFilter(
+            f11MessageFilter);
 
-        // AcceleratorKeyPressed belongs to the WinForms WebView2 control.
-        webView.AcceleratorKeyPressed -=
-            WebView_AcceleratorKeyPressed;
+        UninstallMouseHook();
 
         if (webView.CoreWebView2 is not null)
         {
@@ -462,6 +438,53 @@ public sealed class Form1 : Form
         lifetimeCts.Dispose();
 
         base.OnFormClosed(e);
+    }
+
+    private sealed class F11MessageFilter : IMessageFilter
+    {
+        private readonly Form1 owner;
+
+        public F11MessageFilter(Form1 owner)
+        {
+            this.owner = owner;
+        }
+
+        public bool PreFilterMessage(
+            ref Message message)
+        {
+            bool isKeyDownMessage =
+                message.Msg == WmKeyDown ||
+                message.Msg == WmSysKeyDown;
+
+            int virtualKey =
+                unchecked((int)message.WParam.ToInt64());
+
+            bool isF11 =
+                virtualKey == (int)Keys.F11;
+
+            if (!isKeyDownMessage || !isF11)
+            {
+                return false;
+            }
+
+            // Bit 30 of lParam is set when this is an auto-repeat keydown.
+            // Only toggle once while F11 is held.
+            long lParam =
+                message.LParam.ToInt64();
+
+            bool wasAlreadyDown =
+                (lParam & (1L << 30)) != 0;
+
+            if (!wasAlreadyDown &&
+                !owner.IsDisposed &&
+                owner.IsHandleCreated)
+            {
+                owner.ToggleFullscreen();
+            }
+
+            // Consume F11 so WebView2 cannot process it as its own command.
+            return true;
+        }
     }
 
     [UnmanagedFunctionPointer(
