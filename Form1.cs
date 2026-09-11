@@ -200,30 +200,25 @@ public sealed class Form1 : Form
             "https://krunker.io/");
     }
 
-    private static string BuildBrowserArguments()
-    {
-        // These switches affect rendering behavior only. They cannot reduce
-        // server/network latency. The two uncapping switches may increase
-        // GPU/CPU usage and can cause tearing on some systems.
-        string[] arguments =
-        [
-            "--disable-background-timer-throttling",
-            "--disable-renderer-backgrounding",
-            "--disable-backgrounding-occluded-windows",
+private static string BuildBrowserArguments()
+{
+    // Stable rendering settings. Do not disable GPU vsync or Chromium's
+    // frame-rate limiter while diagnosing click-time latency; those flags can
+    // starve rendering/input/network scheduling when shooting effects appear.
+    string[] arguments =
+    [
+        "--disable-background-timer-throttling",
+        "--disable-renderer-backgrounding",
+        "--disable-backgrounding-occluded-windows",
+        "--enable-gpu-rasterization",
+        "--enable-oop-rasterization",
+        "--enable-zero-copy"
+    ];
 
-            "--disable-gpu-vsync",
-            "--disable-frame-rate-limit",
-
-            "--enable-gpu-rasterization",
-            "--enable-oop-rasterization",
-            "--enable-zero-copy"
-        ];
-
-        return string.Join(
-            ' ',
-            arguments);
-    }
-
+    return string.Join(
+        ' ',
+        arguments);
+}
     private void CoreWebView2_NewWindowRequested(
         object? sender,
         CoreWebView2NewWindowRequestedEventArgs e)
