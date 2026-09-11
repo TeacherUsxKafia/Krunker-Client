@@ -125,16 +125,10 @@ public sealed class Form1 : Form
         CoreWebView2 coreWebView =
             webView.CoreWebView2;
 
-        CoreWebView2Controller? controller =
-            webView.CoreWebView2Controller;
-
-        if (controller is not null)
-        {
-            // AcceleratorKeyPressed belongs to CoreWebView2Controller.
-            // WebView2 sends this event when the embedded browser has focus.
-            controller.AcceleratorKeyPressed +=
-                CoreWebView2Controller_AcceleratorKeyPressed;
-        }
+        // AcceleratorKeyPressed is exposed directly by the WinForms WebView2
+        // control. It fires while the embedded browser has keyboard focus.
+        webView.AcceleratorKeyPressed +=
+            WebView_AcceleratorKeyPressed;
 
         coreWebView.Settings.IsZoomControlEnabled = false;
         coreWebView.Settings.AreDefaultContextMenusEnabled = false;
@@ -187,7 +181,7 @@ public sealed class Form1 : Form
             arguments);
     }
 
-    private void CoreWebView2Controller_AcceleratorKeyPressed(
+    private void WebView_AcceleratorKeyPressed(
         object? sender,
         CoreWebView2AcceleratorKeyPressedEventArgs e)
     {
@@ -195,7 +189,8 @@ public sealed class Form1 : Form
             e.VirtualKey == (uint)Keys.F11;
 
         bool isKeyDown =
-            e.KeyKind == CoreWebView2KeyEventKind.KeyDown;
+            e.KeyEventKind ==
+            CoreWebView2KeyEventKind.KeyDown;
 
         if (!isF11 || !isKeyDown)
         {
@@ -437,34 +432,29 @@ public sealed class Form1 : Form
         isFullscreen = true;
     }
 
-protected override void OnFormClosing(
-    FormClosingEventArgs e)
-{
-    lifetimeCts.Cancel();
-
-    UninstallMouseHook();
-
-    // AcceleratorKeyPressed belongs to CoreWebView2Controller.
-    CoreWebView2Controller? controller =
-        webView.CoreWebView2Controller;
-
-    if (controller is not null)
+    protected override void OnFormClosing(
+        FormClosingEventArgs e)
     {
-        controller.AcceleratorKeyPressed -=
-            CoreWebView2Controller_AcceleratorKeyPressed;
+        lifetimeCts.Cancel();
+
+        UninstallMouseHook();
+
+        // AcceleratorKeyPressed belongs to the WinForms WebView2 control.
+        webView.AcceleratorKeyPressed -=
+            WebView_AcceleratorKeyPressed;
+
+        if (webView.CoreWebView2 is not null)
+        {
+            webView.CoreWebView2.NewWindowRequested -=
+                CoreWebView2_NewWindowRequested;
+
+            webView.CoreWebView2.NavigationStarting -=
+                CoreWebView2_NavigationStarting;
+        }
+
+        base.OnFormClosing(e);
     }
 
-    if (webView.CoreWebView2 is not null)
-    {
-        webView.CoreWebView2.NewWindowRequested -=
-            CoreWebView2_NewWindowRequested;
-
-        webView.CoreWebView2.NavigationStarting -=
-            CoreWebView2_NavigationStarting;
-    }
-
-    base.OnFormClosing(e);
-}
     protected override void OnFormClosed(
         FormClosedEventArgs e)
     {
