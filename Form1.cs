@@ -8,28 +8,17 @@ namespace KrunkerWebViewClient;
 
 public sealed class Form1 : Form
 {
-    private const int WhMouseLl = 14;
-    private const int WmLButtonDown = 0x0201;
-    private const int WmLButtonUp = 0x0202;
+    private const int WmHotKey = 0x0312;
+    private const int F11HotKeyId = 0x4B11;
 
-    private const int WmKeyDown = 0x0100;
-    private const int WmSysKeyDown = 0x0104;
+    private const uint ModNoRepeat = 0x4000;
 
-    // The hook only observes button state. It deliberately does not reinject
-    // mouse_event calls because reinjection can cause recursive hooks,
-    // duplicate clicks, and input-queue stalls.
-    private const bool EnableGlobalMouseHook = true;
-
-    // Priority changes are limited to WebView2 child processes.
-    private const bool EnableWebViewProcessPriority = true;
+    // Keep this disabled. Raising WebView2 to High priority can cause
+    // network and compositor starvation during heavy rendering.
+    private const bool EnableWebViewProcessPriority = false;
 
     private const ProcessPriorityClass WebViewProcessPriority =
-        ProcessPriorityClass.High;
-
-    private static readonly LowLevelMouseProc MouseHookProc =
-        MouseHookCallback;
-
-    private static int leftButtonIsDown;
+        ProcessPriorityClass.AboveNormal;
 
     private readonly WebView2 webView = new()
     {
@@ -38,12 +27,12 @@ public sealed class Form1 : Form
     };
 
     private readonly CancellationTokenSource lifetimeCts = new();
-    private readonly F11MessageFilter f11MessageFilter;
 
-    private IntPtr mouseHookId;
     private Task? processPriorityTask;
     private bool browserInitializationStarted;
     private bool isFullscreen;
+    private bool f11HotKeyRegistered;
+    private F11MessageFilter? f11FallbackFilter;
 
     private FormWindowState previousWindowState =
         FormWindowState.Normal;
@@ -57,17 +46,70 @@ public sealed class Form1 : Form
         StartPosition = FormStartPosition.CenterScreen;
         MinimumSize = new Size(960, 540);
         ClientSize = new Size(1280, 720);
-        KeyPreview = true;
 
         Controls.Add(webView);
 
-        // WebView2 versions differ in which accelerator APIs they expose.
-        // The message filter works without depending on those APIs and can
-        // catch F11 while the embedded browser has focus.
-        f11MessageFilter = new F11MessageFilter(this);
-        Application.AddMessageFilter(f11MessageFilter);
-
         Shown += Form1_Shown;
+    }
+
+    protected override void OnHandleCreated(
+        EventArgs e)
+    {
+        base.OnHandleCreated(e);
+
+        // Register F11 directly against the form window. This still works
+        // while the WebView2 child window owns keyboard focus.
+        f11HotKeyRegistered = RegisterHotKey(
+            Handle,
+            F11HotKeyId,
+            ModNoRepeat,
+            (uint)Keys.F11);
+
+        // Fallback for environments where RegisterHotKey is unavailable.
+        if (!f11HotKeyRegistered)
+        {
+            f11FallbackFilter =
+                new F11MessageFilter(this);
+
+            Application.AddMessageFilter(
+                f11FallbackFilter);
+        }
+    }
+
+    protected override void OnHandleDestroyed(
+        EventArgs e)
+    {
+        if (f11HotKeyRegistered)
+        {
+            UnregisterHotKey(
+                Handle,
+                F11HotKeyId);
+
+            f11HotKeyRegistered = false;
+        }
+
+        if (f11FallbackFilter is not null)
+        {
+            Application.RemoveMessageFilter(
+                f11FallbackFilter);
+
+            f11FallbackFilter = null;
+        }
+
+        base.OnHandleDestroyed(e);
+    }
+
+    protected override void WndProc(
+        ref Message message)
+    {
+        if (message.Msg == WmHotKey &&
+            message.WParam.ToInt64() == F11HotKeyId)
+        {
+            ToggleFullscreen();
+            return;
+        }
+
+        base.WndProc(ref message);
     }
 
     private async void Form1_Shown(
@@ -145,11 +187,8 @@ public sealed class Form1 : Form
         coreWebView.NavigationStarting +=
             CoreWebView2_NavigationStarting;
 
-        if (EnableGlobalMouseHook)
-        {
-            InstallMouseHook();
-        }
-
+        // This is intentionally disabled by default. If enabled, use only
+        // AboveNormal rather than High to reduce scheduling interference.
         if (EnableWebViewProcessPriority)
         {
             processPriorityTask =
@@ -163,9 +202,9 @@ public sealed class Form1 : Form
 
     private static string BuildBrowserArguments()
     {
-        // These switches disable Chromium GPU vsync and its frame-rate limit.
-        // Actual FPS can still be limited by the game, display refresh rate,
-        // GPU driver behavior, or WebView2 implementation details.
+        // These switches affect rendering behavior only. They cannot reduce
+        // server/network latency. The two uncapping switches may increase
+        // GPU/CPU usage and can cause tearing on some systems.
         string[] arguments =
         [
             "--disable-background-timer-throttling",
@@ -259,7 +298,7 @@ public sealed class Form1 : Form
         catch (OperationCanceledException)
             when (cancellationToken.IsCancellationRequested)
         {
-            // Expected when the form closes.
+            // Expected during shutdown.
         }
     }
 
@@ -302,70 +341,6 @@ public sealed class Form1 : Form
         }
     }
 
-    private void InstallMouseHook()
-    {
-        if (!OperatingSystem.IsWindows() ||
-            mouseHookId != IntPtr.Zero)
-        {
-            return;
-        }
-
-        mouseHookId = SetWindowsHookEx(
-            WhMouseLl,
-            MouseHookProc,
-            GetModuleHandle(null),
-            0);
-    }
-
-    private void UninstallMouseHook()
-    {
-        if (mouseHookId == IntPtr.Zero)
-        {
-            return;
-        }
-
-        UnhookWindowsHookEx(mouseHookId);
-
-        mouseHookId = IntPtr.Zero;
-
-        Interlocked.Exchange(
-            ref leftButtonIsDown,
-            0);
-    }
-
-    private static IntPtr MouseHookCallback(
-        int code,
-        IntPtr wParam,
-        IntPtr lParam)
-    {
-        if (code >= 0)
-        {
-            int message =
-                unchecked((int)wParam.ToInt64());
-
-            if (message == WmLButtonDown)
-            {
-                Interlocked.Exchange(
-                    ref leftButtonIsDown,
-                    1);
-            }
-            else if (message == WmLButtonUp)
-            {
-                Interlocked.Exchange(
-                    ref leftButtonIsDown,
-                    0);
-            }
-        }
-
-        // Keep the low-level hook fast. Do not perform UI calls, allocation,
-        // logging, sleeping, or input injection here.
-        return CallNextHookEx(
-            IntPtr.Zero,
-            code,
-            wParam,
-            lParam);
-    }
-
     private void ToggleFullscreen()
     {
         if (IsDisposed || !IsHandleCreated)
@@ -391,41 +366,17 @@ public sealed class Form1 : Form
         isFullscreen = true;
     }
 
-    protected override bool ProcessCmdKey(
-        ref Message msg,
-        Keys keyData)
-    {
-        Keys keyCode =
-            keyData & Keys.KeyCode;
-
-        if (keyCode == Keys.F11)
-        {
-            ToggleFullscreen();
-            return true;
-        }
-
-        return base.ProcessCmdKey(
-            ref msg,
-            keyData);
-    }
-
     protected override void OnFormClosing(
         FormClosingEventArgs e)
     {
         lifetimeCts.Cancel();
 
-        Application.RemoveMessageFilter(
-            f11MessageFilter);
-
-        UninstallMouseHook();
-
-        if (webView.CoreWebView2 is not null)
+        if (f11FallbackFilter is not null)
         {
-            webView.CoreWebView2.NewWindowRequested -=
-                CoreWebView2_NewWindowRequested;
+            Application.RemoveMessageFilter(
+                f11FallbackFilter);
 
-            webView.CoreWebView2.NavigationStarting -=
-                CoreWebView2_NavigationStarting;
+            f11FallbackFilter = null;
         }
 
         base.OnFormClosing(e);
@@ -452,26 +403,26 @@ public sealed class Form1 : Form
         public bool PreFilterMessage(
             ref Message message)
         {
-            bool isKeyDownMessage =
+            const int WmKeyDown = 0x0100;
+            const int WmSysKeyDown = 0x0104;
+
+            bool isKeyDown =
                 message.Msg == WmKeyDown ||
                 message.Msg == WmSysKeyDown;
 
             int virtualKey =
                 unchecked((int)message.WParam.ToInt64());
 
-            bool isF11 =
-                virtualKey == (int)Keys.F11;
-
-            if (!isKeyDownMessage || !isF11)
+            if (!isKeyDown ||
+                virtualKey != (int)Keys.F11)
             {
                 return false;
             }
 
-            // Bit 30 of lParam is set when this is an auto-repeat keydown.
-            // Only toggle once while F11 is held.
             long lParam =
                 message.LParam.ToInt64();
 
+            // Bit 30 indicates an auto-repeat keydown.
             bool wasAlreadyDown =
                 (lParam & (1L << 30)) != 0;
 
@@ -482,45 +433,26 @@ public sealed class Form1 : Form
                 owner.ToggleFullscreen();
             }
 
-            // Consume F11 so WebView2 cannot process it as its own command.
+            // Prevent the browser from handling F11 as its own command.
             return true;
         }
     }
-
-    [UnmanagedFunctionPointer(
-        CallingConvention.Winapi)]
-    private delegate IntPtr LowLevelMouseProc(
-        int code,
-        IntPtr wParam,
-        IntPtr lParam);
-
-    [DllImport(
-        "user32.dll",
-        SetLastError = true)]
-    private static extern IntPtr SetWindowsHookEx(
-        int idHook,
-        LowLevelMouseProc callback,
-        IntPtr moduleHandle,
-        uint threadId);
 
     [DllImport(
         "user32.dll",
         SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool UnhookWindowsHookEx(
-        IntPtr hookHandle);
-
-    [DllImport("user32.dll")]
-    private static extern IntPtr CallNextHookEx(
-        IntPtr hookHandle,
-        int code,
-        IntPtr wParam,
-        IntPtr lParam);
+    private static extern bool RegisterHotKey(
+        IntPtr hWnd,
+        int id,
+        uint fsModifiers,
+        uint vk);
 
     [DllImport(
-        "kernel32.dll",
-        CharSet = CharSet.Unicode,
+        "user32.dll",
         SetLastError = true)]
-    private static extern IntPtr GetModuleHandle(
-        string? moduleName);
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool UnregisterHotKey(
+        IntPtr hWnd,
+        int id);
 }
